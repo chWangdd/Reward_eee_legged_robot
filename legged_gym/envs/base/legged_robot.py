@@ -48,6 +48,9 @@ from legged_gym.utils.math import quat_apply_yaw, wrap_to_pi, torch_rand_sqrt_fl
 from legged_gym.utils.helpers import class_to_dict
 from .legged_robot_config import LeggedRobotCfg
 
+import sympy as sp
+from scipy.integrate import solve_ivp
+
 class LeggedRobot(BaseTask):
     def __init__(self, cfg: LeggedRobotCfg, sim_params, physics_engine, sim_device, headless):
         """ Parses the provided config file,
@@ -70,6 +73,8 @@ class LeggedRobot(BaseTask):
         self._parse_cfg(self.cfg)
         super().__init__(self.cfg, sim_params, physics_engine, sim_device, headless)
 
+        #self.rom_model = Running_Templates(c1, c2, c3, c4, c5, elas_coef)
+
         if not self.headless:
             self.set_camera(self.cfg.viewer.pos, self.cfg.viewer.lookat)
         self._init_buffers()
@@ -84,10 +89,22 @@ class LeggedRobot(BaseTask):
         """
         clip_actions = self.cfg.normalization.clip_actions
         self.actions = torch.clip(actions, -clip_actions, clip_actions).to(self.device)
+
+        # import templates
+        # EoM_model = gen_templates(self.actions)
+        # traj, T = fixed_point(EoM_model)
+
+        # for _ in range(10*T)
+        #    ...
+        
         # step physics and render each frame
         self.render()
         for _ in range(self.cfg.control.decimation):
             self.torques = self._compute_torques(self.actions).view(self.torques.shape)
+
+            rand_noise = (torch.rand(self.torques.shape, device=self.device) - 0.5) * 0.02   # 調整 noise_scale 控制噪聲幅度
+            self.torques = self.torques + rand_noise
+
             self.gym.set_dof_actuation_force_tensor(self.sim, gymtorch.unwrap_tensor(self.torques))
             self.gym.simulate(self.sim)
             if self.device == 'cpu':
@@ -904,3 +921,344 @@ class LeggedRobot(BaseTask):
     def _reward_feet_contact_forces(self):
         # penalize high contact forces
         return torch.sum((torch.norm(self.contact_forces[:, self.feet_indices, :], dim=-1) -  self.cfg.rewards.max_contact_force).clip(min=0.), dim=1)
+
+    #------------ reward functions----------------
+    # def gen_templates(self, actions)
+        """
+        Given the actions from the policy, generate the Euler-Lagrange equations (EoMs) and a reduced-order model (ROM).
+    
+        Args:
+            actions (torch.Tensor): shape (num_envs, num_actions_per_env)
+                The actions proposed by the policy.
+                Assume for demonstration that from actions we extract parameters for Running_Templates.
+    
+        Returns:
+            EoMs_model : A data structure (e.g. Running_Templates instance or precomputed EoMs)
+            T: float or torch.Tensor
+                The period of the resulting gait cycle (if applicable).
+            traj : callable or a structure representing trajectory function traj(t)
+                A function or object that can be called to get target positions for each joint given time t.
+        """
+
+    # def find_fixed_points(self, EoM_model, actions)
+
+class Running_Templates:
+    def __init__(self, c1=None, c2=None, c3=None, c4=None, c5=None, elas_coef=None):
+        """
+        Initialize the Running_Templates class.
+
+        Parameters:
+        c1, c2, c3, c4, c5, elas_coef: float
+            System parameters. If all are provided, symbolic computation is performed.
+        """
+        self.c1 = c1
+        self.c2 = c2
+        self.c3 = c3
+        self.c4 = c4
+        self.c5 = c5
+        self.elas_coef = elas_coef
+        
+        self.EOM_sols = None
+        self.p_expr = None
+        self.J_expr = None
+        self.q1 = self.q2 = None
+        self.q1_dot = self.q2_dot = None
+        self.q1_ddot = self.q2_ddot = None
+        self.m_sym = self.g_sym = self.phi_0_sym = None
+        self.q1_ddot_func = None
+        self.q2_ddot_func = None
+        self.p_func = None
+        self.J_func = None
+        self.last_m_value = None
+        self.last_g_value = None
+        self.last_phi_0_value = None
+
+        # If all parameters are provided, perform symbolic computation
+        if all(param is not None for param in [c1, c2, c3, c4, c5, elas_coef]):
+            self._symbolic_computation()
+        else:
+            # Otherwise, wait to load equations from file
+            self.EOM_sols = None
+            self.p_expr = None
+            self.J_expr = None
+            self.q1 = self.q2 = None  # Prevent undefined attributes
+            self.q1_dot = self.q2_dot = None
+            self.q1_ddot = self.q2_ddot = None
+            self.m_sym = self.g_sym = self.phi_0_sym = None
+            self.q1_ddot_func = self.q2_ddot_func = None
+            self.p_func = self.J_func = None
+            self.last_m_value = self.last_g_value = self.last_phi_0_value = None  # For caching
+
+    def _symbolic_computation(self):
+        """
+        Perform symbolic computation to derive equations of motion and related expressions.
+        """
+        # Define symbolic variables
+        q1, q2 = sp.symbols('q1 q2')
+        q1_dot, q2_dot = sp.symbols('q1_dot q2_dot')
+        q1_ddot, q2_ddot = sp.symbols('q1_ddot q2_ddot')
+        m, g = sp.symbols('m g')
+        phi_0 = sp.symbols('phi_0')
+
+        # Store symbolic variables
+        self.q1, self.q2 = q1, q2
+        self.q1_dot, self.q2_dot = q1_dot, q2_dot
+        self.q1_ddot, self.q2_ddot = q1_ddot, q2_ddot
+        self.m_sym, self.g_sym, self.phi_0_sym = m, g, phi_0
+
+        # Define matrix Xi
+        A = np.array([[self.c1, self.c2],
+                      [self.c2, 0]])
+
+        B = self.c3 * np.eye(2)
+
+        C = -self.c4 * np.array([[np.cos(self.c5), np.sin(self.c5)],
+                                 [np.sin(self.c5), -np.cos(self.c5)]])
+
+        Xi = np.vstack((A, B, C))
+        Xi_sym = sp.Matrix(Xi)
+
+        # Define p1 and p2 expressions
+        p1 = (Xi_sym[0, 0] + Xi_sym[1, 0] * (q2 - q1) +
+              Xi_sym[2, 0] * sp.cos(q1) + Xi_sym[3, 0] * sp.sin(q1) +
+              Xi_sym[4, 0] * sp.cos(q2 - q1) + Xi_sym[5, 0] * sp.sin(q2 - q1))
+
+        p2 = (Xi_sym[0, 1] + Xi_sym[1, 1] * (q2 - q1) +
+              Xi_sym[2, 1] * sp.cos(q1) + Xi_sym[3, 1] * sp.sin(q1) +
+              Xi_sym[4, 1] * sp.cos(q2 - q1) + Xi_sym[5, 1] * sp.sin(q2 - q1))
+
+        p = sp.Matrix([p1, p2])
+        J = p.jacobian([q1, q2])  # Jacobian matrix
+
+        # Define Lagrangian L = T - V
+        p_dot = J * sp.Matrix([q1_dot, q2_dot])
+        T = m * (p_dot.dot(p_dot)) / 2  # Kinetic energy
+        V = (self.elas_coef * (q2 - phi_0) ** 2) / 2 + m * g * p[1]  # Potential energy
+        L = T - V  # Lagrangian
+
+        # Compute Euler-Lagrange equations
+        dL_dq1 = sp.diff(L, q1)
+        dL_dq2 = sp.diff(L, q2)
+        dL_dq1_dot = sp.diff(L, q1_dot)
+        dL_dq2_dot = sp.diff(L, q2_dot)
+
+        d_dt_dL_dq1_dot = (sp.diff(dL_dq1_dot, q1) * q1_dot +
+                           sp.diff(dL_dq1_dot, q2) * q2_dot +
+                           sp.diff(dL_dq1_dot, q1_dot) * q1_ddot +
+                           sp.diff(dL_dq1_dot, q2_dot) * q2_ddot)
+
+        d_dt_dL_dq2_dot = (sp.diff(dL_dq2_dot, q1) * q1_dot +
+                           sp.diff(dL_dq2_dot, q2) * q2_dot +
+                           sp.diff(dL_dq2_dot, q1_dot) * q1_ddot +
+                           sp.diff(dL_dq2_dot, q2_dot) * q2_ddot)
+
+        # Equations of motion
+        EOM1 = d_dt_dL_dq1_dot - dL_dq1
+        EOM2 = d_dt_dL_dq2_dot - dL_dq2
+
+        # Solve for accelerations q1_ddot and q2_ddot
+        sols = sp.solve([EOM1, EOM2], (q1_ddot, q2_ddot), simplify=False)
+
+        # Store symbolic expressions
+        self.EOM_sols = sols
+        self.p_expr = p
+        self.J_expr = J
+
+    def save_equations(self, filename):
+        """
+        Save symbolic expressions and parameters to a file.
+
+        Parameters:
+        filename: str
+            The name of the file to save the equations.
+        """
+        with open(filename, 'wb') as f:
+            pickle.dump((self.EOM_sols, self.p_expr, self.J_expr,
+                         self.c1, self.c2, self.c3, self.c4, self.c5, self.elas_coef), f)
+        print("Equations saved to", filename)
+
+    @classmethod
+    def load_from_file(cls, filename):
+        """
+        Load symbolic expressions from a file and create an instance.
+
+        Parameters:
+        filename: str
+            The name of the file from which to load the equations.
+
+        Returns:
+        instance of Running_Templates
+        """
+        with open(filename, 'rb') as f:
+            EOM_sols, p_expr, J_expr, c1, c2, c3, c4, c5, elas_coef = pickle.load(f)
+        instance = cls(c1, c2, c3, c4, c5, elas_coef)
+        instance.EOM_sols = EOM_sols
+        instance.p_expr = p_expr
+        instance.J_expr = J_expr
+
+        # Define symbolic variables
+        q1, q2 = sp.symbols('q1 q2')
+        q1_dot, q2_dot = sp.symbols('q1_dot q2_dot')
+        q1_ddot, q2_ddot = sp.symbols('q1_ddot q2_ddot')
+        m, g = sp.symbols('m g')
+        phi_0 = sp.symbols('phi_0')
+
+        # Store symbolic variables
+        instance.q1, instance.q2 = q1, q2
+        instance.q1_dot, instance.q2_dot = q1_dot, q2_dot
+        instance.q1_ddot, instance.q2_ddot = q1_ddot, q2_ddot
+        instance.m_sym, instance.g_sym, instance.phi_0_sym = m, g, phi_0
+
+        # Initialize cached parameters
+        instance.q1_ddot_func = instance.q2_ddot_func = None
+        instance.p_func = instance.J_func = None
+        instance.last_m_value = instance.last_g_value = instance.last_phi_0_value = None
+
+        return instance
+
+    def generate_numeric_functions(self, m_value, g_value, phi_0_value):
+        """
+        Generate numerical functions for accelerations and positions.
+
+        Parameters:
+        m_value: float
+            Mass value.
+        g_value: float
+            Gravitational acceleration.
+        phi_0_value: float
+            Numerical value of parameter phi_0.
+        """
+        # Check if parameters have changed to avoid regenerating
+        if (self.q1_ddot_func is not None and
+            self.last_m_value == m_value and
+            self.last_g_value == g_value and
+            self.last_phi_0_value == phi_0_value):
+            # Parameters haven't changed, no need to regenerate
+            return
+
+        # Update cached parameter values
+        self.last_m_value = m_value
+        self.last_g_value = g_value
+        self.last_phi_0_value = phi_0_value
+
+        # Generate numerical functions using provided m, g, phi_0 values
+        q1, q2 = self.q1, self.q2
+        q1_dot, q2_dot = self.q1_dot, self.q2_dot
+        q1_ddot, q2_ddot = self.q1_ddot, self.q2_ddot
+
+        m = self.m_sym
+        g = self.g_sym
+        phi_0 = self.phi_0_sym
+
+        # Substitute numerical values into equations of motion
+        EOM_sols_num = {k: v.subs({m: m_value, g: g_value, phi_0: phi_0_value})
+                        for k, v in self.EOM_sols.items()}
+
+        variables = (q1, q2, q1_dot, q2_dot)
+
+        # Create numerical functions for accelerations
+        self.q1_ddot_func = sp.lambdify(variables, EOM_sols_num[q1_ddot], 'numpy')
+        self.q2_ddot_func = sp.lambdify(variables, EOM_sols_num[q2_ddot], 'numpy')
+
+        # Substitute numerical values into position expressions
+        p_expr_num = self.p_expr.subs({phi_0: phi_0_value})
+
+        # Create numerical functions for positions and Jacobian
+        self.p_func = sp.lambdify((q1, q2), p_expr_num, 'numpy')
+        self.J_func = sp.lambdify((q1, q2), self.J_expr, 'numpy')  # Jacobian doesn't depend on m, g, phi_0
+
+    def simulate(self, theta_0, phi_0_value, m_value=8.557, g_value=9.81, v=None, alpha=None, time_step=0.001):
+        """
+        Perform numerical simulation.
+
+        Parameters:
+        theta_0: float
+            Initial angle theta_0 in radians.
+        phi_0_value: float
+            Numerical value of parameter phi_0.
+        m_value: float
+            Mass value.
+        g_value: float
+            Gravitational acceleration.
+        v: float or None
+            Initial speed magnitude. If None, default is 1.6 m/s.
+        alpha: float or None
+            Initial speed angle in radians. If None, default is 15 degrees (approx 0.2618 radians).
+        time_step: float
+            Time step for simulation.
+
+        Returns:
+        t_sol: numpy.ndarray
+            Time points of the solution.
+        q1_sol: numpy.ndarray
+            Solution for q1 over time.
+        q2_sol: numpy.ndarray
+            Solution for q2 over time.
+        p1_sol: numpy.ndarray
+            x-position over time.
+        p2_sol: numpy.ndarray
+            z-position over time.
+        """
+        # Generate numerical functions with provided m, g, phi_0 values
+        self.generate_numeric_functions(m_value, g_value, phi_0_value)
+
+        # Initial conditions
+        q1_0 = theta_0
+        q2_0 = phi_0_value
+
+        # Initial speed
+        if v is None:
+            v = 1.6  # Default initial speed
+        if alpha is None:
+            alpha = 15 * np.pi / 180  # Default angle in radians
+
+        # Compute initial speed vector in task space
+        p_dot_TD = v * np.array([np.cos(alpha), -np.sin(alpha)])
+
+        # Compute initial q_dot by solving J * q_dot = p_dot_TD
+        J_num = self.J_func(q1_0, q2_0)
+        q_dot0 = np.linalg.solve(J_num, p_dot_TD)
+
+        # Initial state vector
+        initial_state = [q1_0, q2_0, q_dot0[0], q_dot0[1]]
+
+        # Define dynamics function for ODE solver
+        def dynamics(t, state):
+            q1_val, q2_val, q1_dot_val, q2_dot_val = state
+            q1_ddot_val = self.q1_ddot_func(q1_val, q2_val, q1_dot_val, q2_dot_val)
+            q2_ddot_val = self.q2_ddot_func(q1_val, q2_val, q1_dot_val, q2_dot_val)
+            return [q1_dot_val, q2_dot_val, q1_ddot_val, q2_ddot_val]
+
+        # Define event function to stop integration when q2 equals phi_0_value
+        def event_q2_equals_phi_0(t, y):
+            q2_val = y[1]
+            return q2_val - phi_0_value
+
+        event_q2_equals_phi_0.terminal = True
+        event_q2_equals_phi_0.direction = 1
+
+        # Time settings for integration
+        t_span = (0, 0.5)
+        t_eval = np.arange(t_span[0], t_span[1], time_step)
+
+        # Perform numerical integration using solve_ivp
+        solution = solve_ivp(
+            dynamics,
+            t_span,
+            initial_state,
+            t_eval=t_eval,
+            events=event_q2_equals_phi_0,
+            method='RK45'
+        )
+
+        # Extract results
+        t_sol = solution.t
+        q1_sol = solution.y[0]
+        q2_sol = solution.y[1]
+
+        # Compute positions p1 and p2 from q1 and q2
+        p_vals = self.p_func(q1_sol, q2_sol)
+        p1_sol = p_vals[0]
+        p2_sol = p_vals[1]
+
+        return t_sol, q1_sol, q2_sol, p1_sol, p2_sol

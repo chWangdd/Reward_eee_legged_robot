@@ -52,5 +52,5 @@ def test_env(args):
     print("Done")
 
 if __name__ == '__main__':
-    args = get_args()
+    args = get_args() 
     test_env(args)

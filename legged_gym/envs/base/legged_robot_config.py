@@ -32,11 +32,11 @@ from .base_config import BaseConfig
 
 class LeggedRobotCfg(BaseConfig):
     class env:
-        num_envs = 4096
-        num_observations = 235
+        num_envs = 256 # 並行環境的數量，用於加速訓練。原本是4096
+        num_observations = 235 # 觀測空間的維度。
         num_privileged_obs = None # if not None a priviledge_obs_buf will be returned by step() (critic obs for assymetric training). None is returned otherwise 
-        num_actions = 12
-        env_spacing = 3.  # not used with heightfields/trimeshes 
+        num_actions = 12 # 動作空間的維度。
+        env_spacing = 30.  # not used with heightfields/trimeshes #改機器狗之間距離用的 原本是3.
         send_timeouts = True # send time out information to the algorithm
         episode_length_s = 20 # episode length in seconds
 
@@ -92,7 +92,7 @@ class LeggedRobotCfg(BaseConfig):
         stiffness = {'joint_a': 10.0, 'joint_b': 15.}  # [N*m/rad]
         damping = {'joint_a': 1.0, 'joint_b': 1.5}     # [N*m*s/rad]
         # action scale: target angle = actionScale * action + defaultAngle
-        action_scale = 0.5
+        action_scale = 1
         # decimation: Number of control action updates @ sim DT per policy DT
         decimation = 4
 
@@ -144,6 +144,8 @@ class LeggedRobotCfg(BaseConfig):
             feet_stumble = -0.0 
             action_rate = -0.01
             stand_still = -0.
+            forward_velocity = 0.01  # 假设scale设定为0.1
+            landing_stability: 1.0 # 著地穩定性
 
         only_positive_rewards = True # if true negative total rewards are clipped at zero (avoids early termination problems)
         tracking_sigma = 0.25 # tracking reward = exp(-error^2/sigma)
@@ -152,6 +154,7 @@ class LeggedRobotCfg(BaseConfig):
         soft_torque_limit = 1.
         base_height_target = 1.
         max_contact_force = 100. # forces above this value are penalized
+        landing_force_threshold: 50.0 # 著地穩定性
 
     class normalization:
         class obs_scales:
@@ -231,7 +234,7 @@ class LeggedRobotCfgPPO(BaseConfig):
         policy_class_name = 'ActorCritic'
         algorithm_class_name = 'PPO'
         num_steps_per_env = 24 # per iteration
-        max_iterations = 1500 # number of policy updates
+        max_iterations = 1500 # number of policy updates 原本是1500
 
         # logging
         save_interval = 50 # check for potential saves every this many iterations
