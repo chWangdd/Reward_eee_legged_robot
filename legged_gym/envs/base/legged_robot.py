@@ -921,7 +921,28 @@ class LeggedRobot(BaseTask):
     def _reward_feet_contact_forces(self):
         # penalize high contact forces
         return torch.sum((torch.norm(self.contact_forces[:, self.feet_indices, :], dim=-1) -  self.cfg.rewards.max_contact_force).clip(min=0.), dim=1)
+    def _reward_forward_velocity(self):
+    # 以 base_lin_vel[:,0] (x方向速度) 为例，将 x方向速度加上作为奖励
+    # base_lin_vel 是 [num_envs, 3]
+    # 假设您想奖励向前的速度，直接用 x方向速度作为奖励基础：
+        reward = self.base_lin_vel[:, 0]  # x方向速度
+        return reward
+    def _reward_landing_stability(self):
+        """
+        Reward landing stability by minimizing impact forces and angular velocities.
+        """
+    # Calculate vertical contact forces for feet
+        vertical_forces = self.contact_forces[:, self.feet_indices, 2]
+    # Penalize large impact forces during landing
+        force_penalty = torch.sum((vertical_forces - self.cfg.rewards.landing_force_threshold).clip(min=0.0), dim=1)
 
+    # Penalize angular velocities to ensure stability during landing
+        angular_velocity_penalty = torch.sum(torch.square(self.base_ang_vel), dim=1)
+
+    # Combine penalties for total landing stability reward
+        reward = torch.exp(-force_penalty) * torch.exp(-angular_velocity_penalty)
+
+        return reward
     #------------ reward functions----------------
     # def gen_templates(self, actions)
         """
