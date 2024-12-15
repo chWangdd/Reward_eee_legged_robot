@@ -984,6 +984,10 @@ class LeggedRobot(BaseTask):
 
     # def find_fixed_points(self, EoM_model, actions)
 
+import cupy as cp
+import sympy as sp
+from scipy.integrate import solve_ivp
+
 class Running_Templates:
     def __init__(self, c1=None, c2=None, c3=None, c4=None, c5=None, elas_coef=None):
         """
@@ -1049,34 +1053,27 @@ class Running_Templates:
         self.m_sym, self.g_sym, self.phi_0_sym = m, g, phi_0
 
         # Define matrix Xi
-        A = np.array([[self.c1, self.c2],
-                      [self.c2, 0]])
-
-        B = self.c3 * np.eye(2)
-
-        C = -self.c4 * np.array([[np.cos(self.c5), np.sin(self.c5)],
-                                 [np.sin(self.c5), -np.cos(self.c5)]])
-
-        Xi = np.vstack((A, B, C))
-        Xi_sym = sp.Matrix(Xi)
-
+        A = sp.Matrix([[self.c1, self.c2], [self.c2, 0]])
+        B = self.c3 * sp.eye(2)
+        C = -self.c4 * sp.Matrix([[sp.cos(self.c5), sp.sin(self.c5)],
+                                   [sp.sin(self.c5), -sp.cos(self.c5)]])
+        Xi = sp.Matrix.vstack(A, B, C)
+        
         # Define p1 and p2 expressions
-        p1 = (Xi_sym[0, 0] + Xi_sym[1, 0] * (q2 - q1) +
-              Xi_sym[2, 0] * sp.cos(q1) + Xi_sym[3, 0] * sp.sin(q1) +
-              Xi_sym[4, 0] * sp.cos(q2 - q1) + Xi_sym[5, 0] * sp.sin(q2 - q1))
+        p1 = (Xi[0, 0] + Xi[1, 0] * (q2 - q1) + Xi[2, 0] * sp.cos(q1) + Xi[3, 0] * sp.sin(q1) +
+              Xi[4, 0] * sp.cos(q2 - q1) + Xi[5, 0] * sp.sin(q2 - q1))
 
-        p2 = (Xi_sym[0, 1] + Xi_sym[1, 1] * (q2 - q1) +
-              Xi_sym[2, 1] * sp.cos(q1) + Xi_sym[3, 1] * sp.sin(q1) +
-              Xi_sym[4, 1] * sp.cos(q2 - q1) + Xi_sym[5, 1] * sp.sin(q2 - q1))
-
+        p2 = (Xi[0, 1] + Xi[1, 1] * (q2 - q1) + Xi[2, 1] * sp.cos(q1) + Xi[3, 1] * sp.sin(q1) +
+              Xi[4, 1] * sp.cos(q2 - q1) + Xi[5, 1] * sp.sin(q2 - q1))
+      
         p = sp.Matrix([p1, p2])
-        J = p.jacobian([q1, q2])  # Jacobian matrix
+        J = p.jacobian([q1, q2])
 
         # Define Lagrangian L = T - V
         p_dot = J * sp.Matrix([q1_dot, q2_dot])
-        T = m * (p_dot.dot(p_dot)) / 2  # Kinetic energy
-        V = (self.elas_coef * (q2 - phi_0) ** 2) / 2 + m * g * p[1]  # Potential energy
-        L = T - V  # Lagrangian
+        T = m * (p_dot.T * p_dot) / 2
+        V = (self.elas_coef * (q2 - phi_0) ** 2) / 2 + m * g * p[1]
+        L = T - V
 
         # Compute Euler-Lagrange equations
         dL_dq1 = sp.diff(L, q1)
@@ -1094,7 +1091,7 @@ class Running_Templates:
                            sp.diff(dL_dq2_dot, q1_dot) * q1_ddot +
                            sp.diff(dL_dq2_dot, q2_dot) * q2_ddot)
 
-        # Equations of motion
+        # Equations of motion                   
         EOM1 = d_dt_dL_dq1_dot - dL_dq1
         EOM2 = d_dt_dL_dq2_dot - dL_dq2
 
@@ -1105,6 +1102,8 @@ class Running_Templates:
         self.EOM_sols = sols
         self.p_expr = p
         self.J_expr = J
+         
+ 
 
     def save_equations(self, filename):
         """
@@ -1209,6 +1208,7 @@ class Running_Templates:
         self.p_func = sp.lambdify((q1, q2), p_expr_num, 'numpy')
         self.J_func = sp.lambdify((q1, q2), self.J_expr, 'numpy')  # Jacobian doesn't depend on m, g, phi_0
 
+
     def simulate(self, theta_0, phi_0_value, m_value=8.557, g_value=9.81, v=None, alpha=None, time_step=0.001):
         """
         Perform numerical simulation.
@@ -1244,25 +1244,20 @@ class Running_Templates:
         # Generate numerical functions with provided m, g, phi_0 values
         self.generate_numeric_functions(m_value, g_value, phi_0_value)
 
-        # Initial conditions
         q1_0 = theta_0
         q2_0 = phi_0_value
 
-        # Initial speed
         if v is None:
-            v = 1.6  # Default initial speed
+            v = 1.6
         if alpha is None:
-            alpha = 15 * np.pi / 180  # Default angle in radians
-
-        # Compute initial speed vector in task space
-        p_dot_TD = v * np.array([np.cos(alpha), -np.sin(alpha)])
+            alpha = 15 * cp.pi / 180
 
         # Compute initial q_dot by solving J * q_dot = p_dot_TD
+        p_dot_TD = v * cp.array([cp.cos(alpha), -cp.sin(alpha)])
         J_num = self.J_func(q1_0, q2_0)
-        q_dot0 = np.linalg.solve(J_num, p_dot_TD)
+        q_dot0 = cp.linalg.solve(J_num, p_dot_TD)
 
-        # Initial state vector
-        initial_state = [q1_0, q2_0, q_dot0[0], q_dot0[1]]
+        initial_state = cp.array([q1_0, q2_0, q_dot0[0], q_dot0[1]])
 
         # Define dynamics function for ODE solver
         def dynamics(t, state):
@@ -1281,26 +1276,22 @@ class Running_Templates:
 
         # Time settings for integration
         t_span = (0, 0.5)
-        t_eval = np.arange(t_span[0], t_span[1], time_step)
+        t_eval = cp.arange(t_span[0], t_span[1], time_step)
 
-        # Perform numerical integration using solve_ivp
+         # Perform numerical integration using solve_ivp
         solution = solve_ivp(
-            dynamics,
+            lambda t, y: dynamics(t, cp.asnumpy(y)),
             t_span,
-            initial_state,
-            t_eval=t_eval,
-            events=event_q2_equals_phi_0,
+            cp.asnumpy(initial_state),
+            t_eval=cp.asnumpy(t_eval),
             method='RK45'
         )
 
         # Extract results
-        t_sol = solution.t
-        q1_sol = solution.y[0]
-        q2_sol = solution.y[1]
-
         # Compute positions p1 and p2 from q1 and q2
+        t_sol = cp.array(solution.t)
+        q1_sol = cp.array(solution.y[0])
+        q2_sol = cp.array(solution.y[1])
         p_vals = self.p_func(q1_sol, q2_sol)
-        p1_sol = p_vals[0]
-        p2_sol = p_vals[1]
 
-        return t_sol, q1_sol, q2_sol, p1_sol, p2_sol
+        return t_sol, q1_sol, q2_sol, p_vals[0], p_vals[1]
