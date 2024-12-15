@@ -143,9 +143,9 @@ class LeggedRobotCfg(BaseConfig):
             collision = -1.
             feet_stumble = -0.0 
             action_rate = -0.01
-            stand_still = -0.
+            stand_still = -0.01
             forward_velocity = 0.01  # 假设scale设定为0.1
-            landing_stability: 1.0 # 著地穩定性
+            landing_stability: 100.0 # 著地穩定性
 
         only_positive_rewards = True # if true negative total rewards are clipped at zero (avoids early termination problems)
         tracking_sigma = 0.25 # tracking reward = exp(-error^2/sigma)

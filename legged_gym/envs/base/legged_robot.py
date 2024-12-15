@@ -91,6 +91,18 @@ class LeggedRobot(BaseTask):
         self.actions = torch.clip(actions, -clip_actions, clip_actions).to(self.device)
 
         # import templates
+        #t_shift = self.action[]
+        #t_T = self.action
+        #t_now_A = = torch.remainder(self.dt * self.common_step_counter, t_T)
+        #t_now_B = t_now_A + t_shift
+
+        #traj_U_A = self.action[0] + self.action[1]*t_now_A + self.action[2]*t_now_A^2 + self.action[3]*t_now_A^3
+        #traj_U_B = self.action[0] + self.action[1]*t_now_B + self.action[2]*t_now_B^2 + self.action[3]*t_now_B^3
+        #traj_D_A = self.action[4] + self.action[5]*t_now_A + self.action[6]*t_now_A^2 + self.action[7]*t_now_A^3
+        #traj_D_B = self.action[4] + self.action[5]*t_now_B + self.action[6]*t_now_B^2 + self.action[7]*t_now_B^3
+        #traj_ABAD_1 = torch.sin...？
+        #traj_
+
         # EoM_model = gen_templates(self.actions)
         # traj, T = fixed_point(EoM_model)
 
@@ -98,12 +110,18 @@ class LeggedRobot(BaseTask):
         #    ...
         
         # step physics and render each frame
+        with torch.no_grad():
+            self.actions[:, 7] = self.actions[:, 1]
+            self.actions[:, 8] = self.actions[:, 2]
+            self.actions[:, 10] = self.actions[:, 4]
+            self.actions[:, 11] = self.actions[:, 5]
+
         self.render()
         for _ in range(self.cfg.control.decimation):
             self.torques = self._compute_torques(self.actions).view(self.torques.shape)
 
-            rand_noise = (torch.rand(self.torques.shape, device=self.device) - 0.5) * 0.02   # 調整 noise_scale 控制噪聲幅度
-            self.torques = self.torques + rand_noise
+            #rand_noise = (torch.rand(self.torques.shape, device=self.device) - 0.5) * 0.02   # 調整 noise_scale 控制噪聲幅度
+            #self.torques = self.torques + rand_noise
 
             self.gym.set_dof_actuation_force_tensor(self.sim, gymtorch.unwrap_tensor(self.torques))
             self.gym.simulate(self.sim)
@@ -921,28 +939,31 @@ class LeggedRobot(BaseTask):
     def _reward_feet_contact_forces(self):
         # penalize high contact forces
         return torch.sum((torch.norm(self.contact_forces[:, self.feet_indices, :], dim=-1) -  self.cfg.rewards.max_contact_force).clip(min=0.), dim=1)
+
     def _reward_forward_velocity(self):
-    # 以 base_lin_vel[:,0] (x方向速度) 为例，将 x方向速度加上作为奖励
-    # base_lin_vel 是 [num_envs, 3]
-    # 假设您想奖励向前的速度，直接用 x方向速度作为奖励基础：
-        reward = self.base_lin_vel[:, 0]  # x方向速度
+        reward = self.base_lin_vel[:, 0] - torch.abs(self.base_lin_vel[:, 1])  # x方向速度
         return reward
+    
+    def _reward_world_forward_velocity(self):
+        return (self.root_states[:,7]) - (self.root_states[:,8])
+    
     def _reward_landing_stability(self):
         """
         Reward landing stability by minimizing impact forces and angular velocities.
         """
-    # Calculate vertical contact forces for feet
+        # Calculate vertical contact forces for feet
         vertical_forces = self.contact_forces[:, self.feet_indices, 2]
-    # Penalize large impact forces during landing
-        force_penalty = torch.sum((vertical_forces - self.cfg.rewards.landing_force_threshold).clip(min=0.0), dim=1)
+        # Penalize large impact forces during landing
+        force_penalty = torch.sum((vertical_forces - 100.0).clip(min=0.0), dim=1)
 
-    # Penalize angular velocities to ensure stability during landing
+        # Penalize angular velocities to ensure stability during landing
         angular_velocity_penalty = torch.sum(torch.square(self.base_ang_vel), dim=1)
 
-    # Combine penalties for total landing stability reward
+        # Combine penalties for total landing stability reward
         reward = torch.exp(-force_penalty) * torch.exp(-angular_velocity_penalty)
 
         return reward
+
     #------------ reward functions----------------
     # def gen_templates(self, actions)
         """
